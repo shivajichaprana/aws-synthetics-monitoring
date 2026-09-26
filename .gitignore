@@ -1,0 +1,44 @@
+# Terraform state and local working directories
+.terraform/
+.terraform.lock.hcl.bak
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
+
+# Saved plans. Never commit one: a plan file contains resolved values,
+# including anything the provider read from your account.
+*.tfplan
+*.tfplan.*
+
+# Variable files with real values. Only the *.example template is tracked.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# Terraform CLI configuration and credentials
+.terraformrc
+terraform.rc
+
+# Packaged canary bundles built locally
+dist/
+*.zip
+
+# Node tooling for the canary scripts
+node_modules/
+npm-debug.log*
+package-lock.json.bak
+
+# Python tooling for the test suite
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Editor and OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store

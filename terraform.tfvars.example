@@ -1,0 +1,23 @@
+# Copy to terraform.tfvars and edit. Real tfvars files are gitignored.
+
+aws_region  = "us-east-1"
+name_prefix = "synth"
+environment = "dev"
+
+# Recommended. With this set, an apply pointed at the wrong account fails
+# immediately instead of creating resources you then have to find and remove.
+allowed_account_ids = ["123456789012"]
+
+tags = {
+  Owner      = "<your-team>"
+  CostCenter = "<your-cost-center>"
+}
+
+# Storage lever. Screenshots and HAR files dominate artifact cost, so shorten
+# this before reaching for anything else.
+artifact_retention_in_days = 30
+
+# Encryption. Either let this stack own a key, or point it at one you already
+# have and set create_kms_key = false.
+create_kms_key = true
+# kms_key_arn  = "arn:aws:kms:us-east-1:123456789012:key/<your-key-id>"
