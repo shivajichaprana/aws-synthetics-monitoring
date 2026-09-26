@@ -21,3 +21,51 @@ artifact_retention_in_days = 30
 # have and set create_kms_key = false.
 create_kms_key = true
 # kms_key_arn  = "arn:aws:kms:us-east-1:123456789012:key/<your-key-id>"
+
+# --- Canaries ---------------------------------------------------------------
+# Supplying an endpoint is what creates a canary. With both left unset, a plan
+# produces only the artifacts bucket, its key, and the execution role.
+
+api_endpoint        = "https://api.example.com/v1/health"
+api_expected_status = 200
+heartbeat_endpoint  = "https://www.example.com/"
+
+# Cadence. One minute is the floor the service accepts.
+api_canary_schedule_expression       = "rate(5 minutes)"
+heartbeat_canary_schedule_expression = "rate(1 minute)"
+
+# Runtime versions are region-scoped and are retired on a published schedule.
+# Confirm the value is currently offered in your region before pinning it.
+canary_runtime_version = "syn-nodejs-puppeteer-9.1"
+
+# Where the packaged bundle comes from. Set exactly one source.
+canary_code = {
+  zip_path = "dist/canaries.zip"
+}
+# canary_code = {
+#   s3_bucket = "<your-bucket-name>"
+#   s3_key    = "canaries/canaries.zip"
+# }
+
+# Only needed when the plan-time budget guard refuses a canary name: canary
+# names are capped at 21 characters, and the default prefix carries both
+# name_prefix and environment.
+# canary_name_prefix = "obs-stg"
+
+# Extra canaries beyond the two built-in ones. A key of "api" or "heartbeat"
+# replaces the built-in of that name outright.
+# canaries = {
+#   checkout = {
+#     handler               = "checkout-canary.handler"
+#     schedule_expression   = "rate(15 minutes)"
+#     timeout_in_seconds    = 120
+#     environment_variables = { TARGET_URL = "https://www.example.com/checkout" }
+#   }
+# }
+
+# Only for endpoints that are not reachable from the internet. A canary inside
+# your VPC stops proving anything about the path a real client takes.
+# canary_vpc_config = {
+#   subnet_ids         = ["<your-subnet-id>"]
+#   security_group_ids = ["<your-security-group-id>"]
+# }
