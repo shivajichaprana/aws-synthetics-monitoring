@@ -36,7 +36,14 @@ with real values is tracked.
 ├── canaries.tf              Canaries, artifacts bucket, key, role, and guards
 ├── outputs.tf               What was created, and what was deliberately not
 ├── terraform.tfvars.example Template for a real tfvars file
-└── .tflint.hcl              Lint configuration used by the pipeline
+├── .tflint.hcl              Lint configuration used by the pipeline
+└── canary-scripts/          The code the canaries run, and its build
+    ├── api-canary.js        HTTP contract check for a single endpoint
+    ├── heartbeat-canary.js  Minimal availability check at the fastest cadence
+    ├── broken-link-checker.js  Follows a page's links and reports the dead ones
+    ├── visual-monitoring.js Screenshot comparison against a stored baseline
+    ├── build.sh             Packages the scripts into the bundle the service takes
+    └── lib/                 Assertions, config parsing and probing, runtime-free
 ```
 
 ## Configuration
@@ -96,11 +103,21 @@ Two consequences worth knowing before the guard tells you about them:
 
 ### Where the code comes from
 
-The canary scripts are packaged separately from this configuration and pointed
-at through `canary_code`. That split is deliberate: the bundle is a build
-artifact with its own lifecycle, and Synthetics accepts exactly one code source
-per canary. Naming both a local zip and an S3 object is refused at plan time
-rather than at apply time.
+The canary scripts live in [`canary-scripts/`](canary-scripts/README.md) and are
+packaged separately from this configuration, then pointed at through
+`canary_code`. That split is deliberate: the assertions change when the service
+changes, at a different pace from the infrastructure around them, and the bundle
+is a build artifact with its own lifecycle. Synthetics accepts exactly one code
+source per canary, so naming both a local zip and an S3 object is refused at
+plan time rather than at apply time.
+
+```bash
+./canary-scripts/build.sh        # → canary-scripts/dist/canaries.zip
+```
+
+Two further checks ship there beyond the two canaries this configuration creates
+on its own — a broken-link crawler and a visual-regression check. Both are wired
+in through the `canaries` input; that directory's README shows the block.
 
 ### What the guards refuse
 
