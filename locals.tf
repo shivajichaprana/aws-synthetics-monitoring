@@ -136,3 +136,50 @@ locals {
 
   canary_in_vpc = var.canary_vpc_config != null
 }
+
+# Real user monitoring.
+#
+# Gated the same way the canaries are: naming the domain to be observed is what
+# creates the app monitor and the guest identity it needs.
+locals {
+  rum_enabled = var.rum_domain != null
+
+  # An app monitor name may run to 255 characters and is not subject to the
+  # 21-character budget a canary name is, so the descriptive prefix is used in
+  # full rather than abbreviated.
+  rum_app_monitor_name = coalesce(var.rum_app_monitor_name, "${local.name_prefix}-web")
+
+  # Either this configuration owns both halves of the guest identity or it owns
+  # neither. A pool created here paired with somebody else's role would
+  # authorise nothing: the trust policy is scoped to a specific pool id.
+  rum_create_identity = local.rum_enabled && var.rum_create_identity_pool
+
+  rum_identity_pool_id = local.rum_create_identity ? one(aws_cognito_identity_pool.rum[*].id) : var.rum_identity_pool_id
+  rum_guest_role_arn   = local.rum_create_identity ? one(aws_iam_role.rum_guest[*].arn) : var.rum_guest_role_arn
+
+  # Sorted and de-duplicated before use. The API returns this list in its own
+  # order, so passing it through unsorted makes an otherwise identical plan show
+  # a diff whenever the list is rewritten in a different order in tfvars.
+  rum_telemetries = sort(distinct(var.rum_telemetries))
+
+  rum_all_telemetries     = ["errors", "http", "performance"]
+  rum_telemetries_omitted = sort(setsubtract(local.rum_all_telemetries, local.rum_telemetries))
+}
+
+# The values the browser snippet is initialised with, gathered in one place so
+# that wiring up a front end does not mean reading six fields out of the
+# console. Nothing here is a secret: an unauthenticated identity pool id is
+# public by construction, which is the whole reason the guest role is scoped to
+# a single action.
+locals {
+  rum_web_client_config = !local.rum_enabled ? null : {
+    applicationId     = one(aws_rum_app_monitor.this[*].app_monitor_id)
+    applicationRegion = var.aws_region
+    identityPoolId    = local.rum_identity_pool_id
+    guestRoleArn      = local.rum_guest_role_arn
+    sessionSampleRate = var.rum_session_sample_rate
+    telemetries       = local.rum_telemetries
+    allowCookies      = var.rum_allow_cookies
+    enableXRay        = var.rum_enable_xray
+  }
+}

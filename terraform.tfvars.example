@@ -69,3 +69,38 @@ canary_code = {
 #   subnet_ids         = ["<your-subnet-id>"]
 #   security_group_ids = ["<your-security-group-id>"]
 # }
+
+# --- Real user monitoring ---------------------------------------------------
+# Supplying a domain is what creates the app monitor, its Cognito identity pool
+# and the guest role the browser snippet assumes. Leave it unset and none of
+# the settings below are read.
+
+rum_domain = "www.example.com"
+
+# Cost lever. Every ingested event is billed, so raise this only as far as the
+# question being asked actually requires.
+rum_session_sample_rate = 0.1
+
+rum_telemetries   = ["errors", "performance", "http"]
+rum_allow_cookies = true
+rum_enable_xray   = true
+
+# Mirrors every event into CloudWatch Logs, which is the only way to query a
+# single session — and the most expensive setting here. The plan-time guard
+# refuses to combine it with a sample rate above 0.25.
+rum_cw_log_enabled = false
+
+# Off unless the page actually calls recordEvent.
+rum_custom_events_enabled = false
+
+# Use one list or the other, never both: an include list already excludes every
+# page it does not name.
+# rum_included_pages = ["https://www.example.com/checkout"]
+# rum_excluded_pages = ["https://www.example.com/account"]
+# rum_favorite_pages = ["https://www.example.com/"]
+
+# Reuse an identity pool and guest role that already exist, instead of letting
+# this configuration create them. Both are required together.
+# rum_create_identity_pool = false
+# rum_identity_pool_id     = "us-east-1:00000000-0000-0000-0000-000000000000"
+# rum_guest_role_arn       = "arn:aws:iam::123456789012:role/<your-rum-guest-role>"

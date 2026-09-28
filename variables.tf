@@ -255,3 +255,126 @@ variable "canary_vpc_config" {
   })
   default = null
 }
+
+# ---------------------------------------------------------------------------
+# Real user monitoring
+#
+# Setting rum_domain is what brings the app monitor and its guest identity into
+# existence, in the same way that setting an endpoint brings a canary into
+# existence. Left null, none of the inputs below are read and nothing in rum.tf
+# is created.
+# ---------------------------------------------------------------------------
+
+variable "rum_domain" {
+  description = "Host the web client is served from, for example www.example.com. A single leading wildcard label is accepted to cover subdomains. Host only: no scheme, no port, no path. Leave null and no real user monitoring resources are created."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.rum_domain == null || can(regex("^(\\*\\.)?([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$", coalesce(var.rum_domain, "x.example")))
+    error_message = "rum_domain must be a bare lowercase host such as www.example.com or *.example.com, with no scheme, port or path."
+  }
+}
+
+variable "rum_app_monitor_name" {
+  description = "Overrides the app monitor name, which otherwise derives from the shared prefix with a -web suffix. Unlike a canary name this one is not budget-constrained, so something descriptive is fine here."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.rum_app_monitor_name == null || can(regex("^[A-Za-z0-9._/#-]{1,255}$", coalesce(var.rum_app_monitor_name, "x")))
+    error_message = "rum_app_monitor_name must be 1-255 characters of letters, digits, dot, underscore, slash, hash or hyphen."
+  }
+}
+
+variable "rum_session_sample_rate" {
+  description = "Fraction of browser sessions the web client reports on, from 0 to 1. This is the main cost lever for real user monitoring, because every ingested event is billed. A tenth is usually enough to see a regression in aggregate, and too little to characterise a rare error."
+  type        = number
+  default     = 0.1
+
+  validation {
+    condition     = var.rum_session_sample_rate >= 0 && var.rum_session_sample_rate <= 1
+    error_message = "rum_session_sample_rate must be between 0 and 1 inclusive."
+  }
+}
+
+variable "rum_telemetries" {
+  description = "Signals the web client collects: errors for uncaught JavaScript exceptions, performance for load timings and web vitals, http for XHR and fetch outcomes. Order is not significant, because the list is sorted before use."
+  type        = list(string)
+  default     = ["errors", "performance", "http"]
+
+  validation {
+    condition     = alltrue([for signal in var.rum_telemetries : contains(["errors", "performance", "http"], signal)])
+    error_message = "rum_telemetries may only contain errors, performance or http."
+  }
+}
+
+variable "rum_allow_cookies" {
+  description = "Let the web client set its own first-party cookie so it can recognise a returning session. Without it every page view arrives as a new session, which inflates session counts and makes any multi-page view meaningless."
+  type        = bool
+  default     = true
+}
+
+variable "rum_enable_xray" {
+  description = "Trace XHR and fetch calls made by the page into X-Ray, so a slow render can be followed into the service behind it. Requires the http telemetry, which the plan-time guard checks."
+  type        = bool
+  default     = true
+}
+
+variable "rum_cw_log_enabled" {
+  description = "Also write every ingested event into a CloudWatch Logs group. This is the only way to query an individual session after the fact, and it is the largest cost this configuration can incur, so it is off by default. The service creates and owns that log group, which is why its retention is not managed here."
+  type        = bool
+  default     = false
+}
+
+variable "rum_custom_events_enabled" {
+  description = "Allow the page to record application-defined events. Off by default, because a custom event emitted from a loop in the page is ingested and billed exactly like a useful one."
+  type        = bool
+  default     = false
+}
+
+variable "rum_included_pages" {
+  description = "Page URL patterns to monitor, to the exclusion of every page not named. Leave empty to monitor the whole site. Mutually exclusive with rum_excluded_pages."
+  type        = list(string)
+  default     = []
+}
+
+variable "rum_excluded_pages" {
+  description = "Page URL patterns to leave unmonitored, typically authenticated or payment paths whose URLs carry identifiers better left uningested. Mutually exclusive with rum_included_pages."
+  type        = list(string)
+  default     = []
+}
+
+variable "rum_favorite_pages" {
+  description = "Page URL patterns pinned to the top of the app monitor's page list in the console. Cosmetic: it changes what is easy to find, not what is collected."
+  type        = list(string)
+  default     = []
+}
+
+variable "rum_create_identity_pool" {
+  description = "Create the unauthenticated Cognito identity pool and guest role the web client uses. Set to false to reuse an existing pair, for example one shared by several app monitors, and supply both rum_identity_pool_id and rum_guest_role_arn."
+  type        = bool
+  default     = true
+}
+
+variable "rum_identity_pool_id" {
+  description = "Identity pool the web client obtains guest credentials from. Only read when rum_create_identity_pool is false."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.rum_identity_pool_id == null || can(regex("^[a-z]{2}(-[a-z]+)+-[0-9]:[0-9a-f-]{36}$", coalesce(var.rum_identity_pool_id, "us-east-1:00000000-0000-0000-0000-000000000000")))
+    error_message = "rum_identity_pool_id must look like us-east-1:00000000-0000-0000-0000-000000000000."
+  }
+}
+
+variable "rum_guest_role_arn" {
+  description = "Role unauthenticated browser sessions assume. It must already permit rum:PutRumEvents on this app monitor, which nothing here can verify. Only read when rum_create_identity_pool is false."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.rum_guest_role_arn == null || can(regex("^arn:aws[a-z-]*:iam::[0-9]{12}:role/", coalesce(var.rum_guest_role_arn, "arn:aws:iam::123456789012:role/x")))
+    error_message = "rum_guest_role_arn must be an IAM role ARN when set."
+  }
+}
