@@ -378,3 +378,316 @@ variable "rum_guest_role_arn" {
     error_message = "rum_guest_role_arn must be an IAM role ARN when set."
   }
 }
+
+# ---------------------------------------------------------------------------
+# Service level objectives
+#
+# A canary is a probe, not a request log. That distinction governs every input
+# below, and it is worth stating plainly before the first one: burn-rate
+# alerting was designed for request-based availability, where a window contains
+# tens of thousands of events and an error rate of 0.1% is a real number. A
+# canary on a five-minute schedule contributes twelve samples an hour, so the
+# finest error rate it can express over an hour is one failure in twelve, or
+# 8.3%. Any threshold below that granularity is reached by a single failed run.
+#
+# Nothing here hides that. The objective is deliberately defaulted to something
+# a canary can actually measure, the plan-time guards refuse the configurations
+# where the arithmetic is nonsense, and the outputs name every window whose
+# threshold is finer than its own sampling.
+# ---------------------------------------------------------------------------
+
+variable "slo_objective" {
+  description = "Availability objective every canary is held to, as a fraction. The default is 0.995 rather than the more fashionable 0.999 because of sampling, not ambition: a five-minute canary cannot distinguish a 0.1% error rate from a single failed run over any window short enough to alert on. Raise it only alongside a faster canary schedule, and read slo_windows_undersampled afterwards."
+  type        = number
+  default     = 0.995
+
+  validation {
+    condition     = var.slo_objective > 0 && var.slo_objective < 1
+    error_message = "slo_objective must be a fraction strictly between 0 and 1, for example 0.995 for 99.5%."
+  }
+}
+
+variable "slo_window_days" {
+  description = "Length of the error-budget period, in days. This does not size any alarm window; it is what the budget arithmetic and the dashboard header are expressed against, so that a burn rate has a period to burn through."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.slo_window_days >= 1 && var.slo_window_days <= 365
+    error_message = "slo_window_days must be between 1 and 365."
+  }
+}
+
+variable "slo_burn_rate_tiers" {
+  description = "Burn-rate tiers, keyed by name. Each tier becomes two metric alarms — one over the long window, one over the short — and one composite alarm that fires only while BOTH are breaching. The long window is what makes the tier precise; the short one is what makes it stop alerting promptly once the endpoint recovers. The defaults are the widely used 14.4-over-an-hour and 6-over-six-hours pair, which consume 2% and 5% of a 30-day budget respectively."
+  type = map(object({
+    burn_rate           = number
+    long_window_minutes = number
+    # Kept short on purpose. Its job is recovery latency, not precision: over a
+    # window this brief almost no canary produces enough runs for the threshold
+    # to mean anything other than "at least one failure", which is why the
+    # undersampling report below only considers long windows.
+    short_window_minutes = number
+    description          = optional(string)
+  }))
+
+  default = {
+    fast = {
+      burn_rate            = 14.4
+      long_window_minutes  = 60
+      short_window_minutes = 5
+      description          = "Consumes 2% of a 30-day budget in an hour. Page on this."
+    }
+    slow = {
+      burn_rate            = 6
+      long_window_minutes  = 360
+      short_window_minutes = 30
+      description          = "Consumes 5% of a 30-day budget in six hours. A ticket, not a page."
+    }
+  }
+
+  validation {
+    condition     = alltrue([for key in keys(var.slo_burn_rate_tiers) : can(regex("^[a-z0-9][a-z0-9-]{0,23}$", key))])
+    error_message = "Burn-rate tier keys must be 1-24 characters of lowercase letters, digits or hyphens, and must start with a letter or digit, because the key appears in every alarm name derived from the tier."
+  }
+
+  validation {
+    condition     = alltrue([for tier in values(var.slo_burn_rate_tiers) : tier.burn_rate > 0])
+    error_message = "Every burn_rate must be greater than zero. A burn rate of zero would set the alarm threshold at the objective itself, which alerts on the budget being touched at all rather than on it being spent too fast."
+  }
+
+  validation {
+    condition = alltrue([
+      for tier in values(var.slo_burn_rate_tiers) :
+      tier.long_window_minutes >= 1 && tier.long_window_minutes <= 1440 &&
+      tier.short_window_minutes >= 1 && tier.short_window_minutes <= 1440
+    ])
+    error_message = "Burn-rate windows must be between 1 and 1440 minutes. The ceiling is the 86400-second maximum CloudWatch accepts for an alarm period: a window longer than a day cannot be one alarm period, and splitting it across several periods asks a different question — every day breaching, rather than the multi-day average breaching."
+  }
+
+  validation {
+    condition     = alltrue([for tier in values(var.slo_burn_rate_tiers) : tier.description == null || length(coalesce(tier.description, "")) <= 300])
+    error_message = "A tier description is longer than 300 characters. It is appended to the composite alarm's own description, and CloudWatch caps an alarm description at 1024 characters in total."
+  }
+
+  validation {
+    condition     = alltrue([for tier in values(var.slo_burn_rate_tiers) : tier.short_window_minutes < tier.long_window_minutes])
+    error_message = "Each tier's short_window_minutes must be shorter than its long_window_minutes. The pair exists so that a long, precise window decides whether to alert and a short one decides when to stop; equal windows make the second alarm redundant."
+  }
+}
+
+variable "slo_latency_objective_ms" {
+  description = "Latency budget for a canary run, in milliseconds. Compared against the Synthetics Duration metric, which is scoped to a single step where a step name is known and to the whole run otherwise — and a whole-run duration on a browser runtime is dominated by browser startup, so read slo_latency_measures_harness before trusting the number."
+  type        = number
+  default     = 2000
+
+  validation {
+    condition     = var.slo_latency_objective_ms >= 1 && var.slo_latency_objective_ms <= 840000
+    error_message = "slo_latency_objective_ms must be between 1 and 840000, the latter being the longest run the Synthetics service permits."
+  }
+}
+
+variable "slo_latency_statistic" {
+  description = "Statistic the latency alarm evaluates. A percentile is the useful choice and is also the one that interacts with sampling: over a window holding twelve runs, p99 is simply the slowest of the twelve. Named statistics (Average, Maximum, Minimum, Sum) are accepted too."
+  type        = string
+  default     = "p90"
+
+  validation {
+    condition     = can(regex("^(Average|Maximum|Minimum|Sum|p(100|[0-9]{1,2}(\\.[0-9]{1,2})?))$", var.slo_latency_statistic))
+    error_message = "slo_latency_statistic must be Average, Maximum, Minimum, Sum, or a percentile such as p90 or p99.9."
+  }
+}
+
+variable "slo_latency_window_minutes" {
+  description = "Length of each latency evaluation period, in minutes."
+  type        = number
+  default     = 15
+
+  validation {
+    condition     = var.slo_latency_window_minutes >= 1 && var.slo_latency_window_minutes <= 1440
+    error_message = "slo_latency_window_minutes must be between 1 and 1440, the latter being the 86400-second alarm-period ceiling."
+  }
+}
+
+variable "slo_latency_evaluation_periods" {
+  description = "How many consecutive latency periods are considered. Latency deliberately uses consecutive periods rather than a burn rate: there is no error budget being spent, only a distribution drifting, and a single slow window is usually a deploy rather than a regression."
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.slo_latency_evaluation_periods >= 1 && var.slo_latency_evaluation_periods <= 24
+    error_message = "slo_latency_evaluation_periods must be between 1 and 24."
+  }
+}
+
+variable "slo_latency_datapoints_to_alarm" {
+  description = "How many of the evaluated latency periods must breach. Leave null to require all of them. Setting it below slo_latency_evaluation_periods gives the M-of-N behaviour that tolerates one slow window without ignoring a pattern of them."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.slo_latency_datapoints_to_alarm == null || (coalesce(var.slo_latency_datapoints_to_alarm, 1) >= 1 && coalesce(var.slo_latency_datapoints_to_alarm, 1) <= 24)
+    error_message = "slo_latency_datapoints_to_alarm must be between 1 and 24 when set."
+  }
+}
+
+variable "slo_canary_overrides" {
+  description = "Per-canary overrides, keyed by the same key the canary is declared under. latency_step_name is the one worth knowing about: naming the step scopes the Duration metric to that step instead of the whole run, which is the difference between measuring the endpoint and measuring the canary's browser starting up. The shipped API and heartbeat canaries have their step names filled in already."
+  type = map(object({
+    enabled              = optional(bool, true)
+    objective            = optional(number)
+    latency_objective_ms = optional(number)
+    latency_step_name    = optional(string)
+  }))
+  default = {}
+
+  validation {
+    condition = alltrue([
+      for override in values(var.slo_canary_overrides) :
+      override.objective == null || (coalesce(override.objective, 0.5) > 0 && coalesce(override.objective, 0.5) < 1)
+    ])
+    error_message = "Every objective override must be a fraction strictly between 0 and 1."
+  }
+
+  validation {
+    condition = alltrue([
+      for override in values(var.slo_canary_overrides) :
+      override.latency_objective_ms == null || (coalesce(override.latency_objective_ms, 1) >= 1 && coalesce(override.latency_objective_ms, 1) <= 840000)
+    ])
+    error_message = "Every latency_objective_ms override must be between 1 and 840000."
+  }
+
+  validation {
+    condition = alltrue([
+      for override in values(var.slo_canary_overrides) :
+      override.latency_step_name == null || can(regex("^[A-Za-z0-9_.-]{1,255}$", coalesce(override.latency_step_name, "x")))
+    ])
+    error_message = "latency_step_name must be 1-255 characters of letters, digits, dot, underscore or hyphen, and must match the step name the canary script passes to executeStep or executeHttpStep exactly — the dimension is not created if it does not."
+  }
+}
+
+variable "slo_treat_missing_data_as_breaching" {
+  description = "Treat an availability window with no canary runs in it as a breach. This is on by default, and it is the single most consequential setting here: with it off, a canary that has stopped reporting — deleted, throttled, or failing before it can publish a metric — leaves its alarm in INSUFFICIENT_DATA, which pages nobody and looks calm on a dashboard. The cost of leaving it on is that a canary you deliberately stop starts alerting, which is why alarms are only built for canaries that are actually started."
+  type        = bool
+  default     = true
+}
+
+variable "slo_suppressor_alarm_name" {
+  description = "Name of an existing alarm that suppresses SLO notifications while it is itself in ALARM — the supported way to hold pages during a planned change window without deleting the alarms that would otherwise fire. Nothing here can verify the alarm exists, and a suppressor naming an alarm that does not exist suppresses nothing. Suppression stops actions only: the composite alarm still shows ALARM, so the dashboard keeps telling the truth."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.slo_suppressor_alarm_name == null || can(regex("^[^\\s].{0,254}$", coalesce(var.slo_suppressor_alarm_name, "x")))
+    error_message = "slo_suppressor_alarm_name must be a non-empty alarm name of at most 255 characters when set."
+  }
+}
+
+variable "slo_suppressor_wait_period_seconds" {
+  description = "How long a composite alarm waits for the suppressor to report before deciding it is not suppressed. Too short and a suppressor that has not yet evaluated fails to hold the first notification of a change window."
+  type        = number
+  default     = 120
+
+  validation {
+    condition     = var.slo_suppressor_wait_period_seconds >= 0 && var.slo_suppressor_wait_period_seconds <= 3600
+    error_message = "slo_suppressor_wait_period_seconds must be between 0 and 3600."
+  }
+}
+
+variable "slo_suppressor_extension_period_seconds" {
+  description = "How long suppression persists after the suppressor leaves ALARM. This covers the gap where a change window has closed but the endpoint has not yet recovered enough for the canary to succeed, which would otherwise page on the way out of every deployment."
+  type        = number
+  default     = 120
+
+  validation {
+    condition     = var.slo_suppressor_extension_period_seconds >= 0 && var.slo_suppressor_extension_period_seconds <= 3600
+    error_message = "slo_suppressor_extension_period_seconds must be between 0 and 3600."
+  }
+}
+
+variable "create_slo_rollup_alarm" {
+  description = "Create one composite alarm that is in ALARM whenever any burn-rate tier or latency alarm is. It carries no actions by design — everything that pages already pages — and exists so that a dashboard and a console list can answer 'is any objective in trouble' with one light instead of a count."
+  type        = bool
+  default     = true
+}
+
+# ---------------------------------------------------------------------------
+# Alert delivery
+# ---------------------------------------------------------------------------
+
+variable "create_alerts_topic" {
+  description = "Create the SNS topic alarm notifications are published to. Set to false and supply alerts_topic_arn to route into an existing on-call pipeline instead."
+  type        = bool
+  default     = true
+}
+
+variable "alerts_topic_arn" {
+  description = "Existing SNS topic to publish alarm notifications to. Required when create_alerts_topic is false. Nothing here can check that its access policy admits CloudWatch or that its encryption key does; both are the usual reasons an alarm changes state and nobody hears about it."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.alerts_topic_arn == null || can(regex("^arn:aws[a-z-]*:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]+(\\.fifo)?$", coalesce(var.alerts_topic_arn, "arn:aws:sns:us-east-1:123456789012:x")))
+    error_message = "alerts_topic_arn must be an SNS topic ARN when set. A FIFO ARN is accepted by this shape check and refused by the plan-time guard instead, which can say why."
+  }
+}
+
+variable "create_alerts_kms_key" {
+  description = "Create a customer-managed key for the alerts topic. This is separate from the artifacts key on purpose, because it needs a key policy the artifacts key must not have: a grant to the CloudWatch service principal. An AWS-managed key cannot be given that grant at all, which is why alias/aws/sns is the wrong answer here and the guard refuses it outright."
+  type        = bool
+  default     = true
+}
+
+variable "alerts_kms_key_arn" {
+  description = "Existing customer-managed key to encrypt the alerts topic with. Its key policy must permit cloudwatch.amazonaws.com to call kms:GenerateDataKey* and kms:Decrypt, or every alarm notification is rejected by KMS after the alarm has already changed state — a failure with no trace on the alarm itself. Leave null with create_alerts_kms_key false for an unencrypted topic."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.alerts_kms_key_arn == null || can(regex("^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:(key/[a-f0-9-]+|alias/.+)$", coalesce(var.alerts_kms_key_arn, "arn:aws:kms:us-east-1:123456789012:key/x")))
+    error_message = "alerts_kms_key_arn must be a KMS key or alias ARN when set."
+  }
+}
+
+variable "alerts_email_addresses" {
+  description = "Addresses subscribed to the alerts topic. Every subscription starts unconfirmed: the address holder must click a link, and until they do the subscription exists, plans clean, and delivers nothing. Treat this as a convenience for a small team, not as the routing for an on-call rotation."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for address in var.alerts_email_addresses : can(regex("^[^@\\s]+@[^@\\s.]+(\\.[^@\\s.]+)+$", address))])
+    error_message = "Every entry in alerts_email_addresses must look like an email address."
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
+
+variable "create_dashboard" {
+  description = "Create the CloudWatch dashboard summarising every objective, the canaries behind it, and the alarms derived from it."
+  type        = bool
+  default     = true
+}
+
+variable "dashboard_name" {
+  description = "Overrides the dashboard name, which otherwise derives from the shared prefix. Dashboard names admit only letters, digits, hyphens and underscores — notably not dots, which is easy to trip over when a name is built from a hostname."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.dashboard_name == null || can(regex("^[A-Za-z0-9_-]{1,255}$", coalesce(var.dashboard_name, "x")))
+    error_message = "dashboard_name must be 1-255 characters of letters, digits, hyphens or underscores. Dots are not accepted by the service."
+  }
+}
+
+variable "dashboard_period_seconds" {
+  description = "Bucket width for the dashboard's time-series widgets, in seconds. The single-value tiles ignore this and aggregate across whatever range the dashboard is being viewed over, so that the headline success rate always describes the period on screen."
+  type        = number
+  default     = 300
+
+  validation {
+    condition     = var.dashboard_period_seconds >= 60 && var.dashboard_period_seconds <= 86400 && var.dashboard_period_seconds % 60 == 0
+    error_message = "dashboard_period_seconds must be between 60 and 86400 and a multiple of 60."
+  }
+}

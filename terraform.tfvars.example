@@ -104,3 +104,97 @@ rum_custom_events_enabled = false
 # rum_create_identity_pool = false
 # rum_identity_pool_id     = "us-east-1:00000000-0000-0000-0000-000000000000"
 # rum_guest_role_arn       = "arn:aws:iam::123456789012:role/<your-rum-guest-role>"
+
+# --- Objectives and alerting ------------------------------------------------
+# A canary contributes one sample per run, so the finest error rate a window can
+# express is one failure divided by the runs it holds: over an hour, a canary on
+# rate(5 minutes) can only say 0%, 8.3%, 16.7% and so on. The objective below is
+# set where a canary at these cadences can actually measure it. Raise it and the
+# plan-time guard will say so; `terraform output slo_windows_undersampled` names
+# every window whose threshold a single failed run already reaches.
+
+slo_objective   = 0.995
+slo_window_days = 30
+
+# Two tiers, which is the usual pair: page on the fast one, raise a ticket on
+# the slow one. Each becomes two alarms — long window and short — plus the
+# composite alarm that notifies only while both are breaching.
+slo_burn_rate_tiers = {
+  fast = {
+    burn_rate            = 14.4
+    long_window_minutes  = 60
+    short_window_minutes = 5
+    description          = "Consumes 2% of a 30-day budget in an hour. Page on this."
+  }
+  slow = {
+    burn_rate            = 6
+    long_window_minutes  = 360
+    short_window_minutes = 30
+    description          = "Consumes 5% of a 30-day budget in six hours. A ticket, not a page."
+  }
+}
+
+# Latency is not a burn rate: nothing is being spent, a distribution is moving.
+# So the alarm asks for consecutive slow windows instead.
+slo_latency_objective_ms       = 2000
+slo_latency_statistic          = "p90"
+slo_latency_window_minutes     = 15
+slo_latency_evaluation_periods = 2
+# Tolerate one slow window out of three rather than requiring all of them.
+# slo_latency_datapoints_to_alarm = 2
+
+# Treat a window with no canary runs in it as a breach. Leave this on: with it
+# off, a canary that has stopped reporting leaves its alarm in INSUFFICIENT_DATA,
+# which notifies nobody and looks calm on the dashboard.
+slo_treat_missing_data_as_breaching = true
+
+# Per-canary overrides. `latency_step_name` is the one that changes what is
+# measured: named, the Duration metric is that step's elapsed time; unnamed, it
+# is the whole run, browser startup included. The two shipped canaries have
+# their step names built in.
+# slo_canary_overrides = {
+#   api = {
+#     objective            = 0.999
+#     latency_objective_ms = 800
+#     latency_step_name    = "contract"
+#   }
+#   checkout = {
+#     latency_step_name = "submit"
+#   }
+# }
+
+# Holds pages during a planned change window without deleting the alarms that
+# would otherwise fire. Suppression stops the notification, never the alarm
+# state, so the dashboard keeps telling the truth.
+# slo_suppressor_alarm_name               = "<your-maintenance-window-alarm>"
+# slo_suppressor_wait_period_seconds      = 120
+# slo_suppressor_extension_period_seconds = 120
+
+# One light for "is any objective in trouble". Notifies nobody by design.
+create_slo_rollup_alarm = true
+
+# Alert delivery. The key matters more than it looks: an encrypted SNS topic is
+# only usable by CloudWatch if the key policy grants the CloudWatch service
+# principal, and an AWS-managed key's policy cannot be changed — so a topic on
+# alias/aws/sns rejects every alarm notification with no sign of it on the alarm.
+# The key created here carries the right policy; the guard refuses an
+# alias/aws/... ARN outright.
+create_alerts_topic   = true
+create_alerts_kms_key = true
+# create_alerts_kms_key = false
+# alerts_kms_key_arn   = "arn:aws:kms:us-east-1:123456789012:key/<your-key-id>"
+
+# Route into an on-call pipeline instead of a topic owned here. Neither that
+# topic's access policy nor its encryption key can be checked from here.
+# create_alerts_topic = false
+# alerts_topic_arn    = "arn:aws:sns:us-east-1:123456789012:<your-oncall-topic>"
+
+# Convenience for a small team, not routing for a rotation: every subscription
+# starts unconfirmed and delivers nothing until its owner clicks the link.
+alerts_email_addresses = ["<your-team>@example.invalid"]
+
+# --- Dashboard --------------------------------------------------------------
+create_dashboard         = true
+dashboard_period_seconds = 300
+# Letters, digits, hyphens and underscores only — dots are not accepted.
+# dashboard_name = "synth-dev-slo"
