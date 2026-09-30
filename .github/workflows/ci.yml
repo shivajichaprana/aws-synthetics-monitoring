@@ -1,0 +1,135 @@
+# Every gate here runs on a pull request and on main, and every one of them can
+# be run locally with the same flags.
+#
+# The pipeline is split by what it is checking rather than by tool, because the
+# two halves of this repository fail in different ways. The Terraform decides
+# which endpoints are watched and with what permissions, and its mistakes surface
+# at plan time. The canary scripts decide what healthy means, and their mistakes
+# surface as a run that passes while the endpoint is broken — which is why the
+# script half carries a test suite and not only a linter.
+name: synthetics-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TERRAFORM_VERSION: 1.9.8
+  TFLINT_VERSION: v0.53.0
+  # Pinned at 22 rather than left to the runner image. The test runner's
+  # directory globbing and its --test-timeout flag are both needed below, and
+  # neither is present on every version an image might ship.
+  NODE_VERSION: 22
+
+jobs:
+  terraform-validate:
+    name: terraform validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -diff -recursive
+
+      # No backend: nothing here talks to a state store, and a validate that
+      # needed credentials would be a validate that only runs where they are.
+      - name: terraform init
+        run: terraform init -backend=false -input=false
+
+      - name: terraform validate
+        run: terraform validate
+
+  tflint:
+    name: tflint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: terraform-linters/setup-tflint@19a52fbac37dacb22a09518e4ef6ee234f2d4987 # v4.0.0
+        with:
+          tflint_version: ${{ env.TFLINT_VERSION }}
+
+      - run: tflint --init
+
+      # Warnings are reported and do not fail the run. An error is a rule the
+      # configuration cannot satisfy; a warning is usually a preference, and a
+      # pipeline that fails on preferences stops being read.
+      - name: tflint
+        run: tflint --recursive --minimum-failure-severity=error
+
+  canary-scripts:
+    name: canary-script lint and bundle
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # A syntax error in a canary script is a failed run in production, because
+      # the service compiles the bundle on first invocation and not before.
+      - name: syntax
+        run: git ls-files 'canary-scripts/*.js' 'canary-scripts/lib/*.js' | xargs -r -n1 node --check
+
+      # Run directly rather than through the test runner. A check that only
+      # works when a runner is configured stops running the first time the
+      # environment changes, and this one enforces the properties the rest of
+      # the repository depends on: no third-party code in the bundle, no helper
+      # touching the Synthetics runtime, no hardcoded target.
+      - name: conventions
+        run: node tests/lint/canary-conventions.js
+
+      - name: shell syntax
+        run: bash -n canary-scripts/build.sh
+
+      - name: shellcheck
+        run: shellcheck canary-scripts/build.sh
+
+      # The build is run for real. A Node.js canary is a zip whose contents sit
+      # under nodejs/node_modules/, and anything laid out differently fails at
+      # the first run with a module error that says nothing about the layout.
+      - name: bundle
+        run: ./canary-scripts/build.sh
+
+  tests:
+    name: canary-script tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # The suite has no dependencies to install: it runs on the standard
+      # library test runner, and the bundle it exercises carries no third-party
+      # code either.
+      #
+      # The timeout is not decoration. Several of these tests hold a socket open
+      # deliberately to prove a per-request timeout fires, so a regression in
+      # that timeout makes the suite hang rather than fail — and a job that
+      # hangs is worse than one that goes red, because nothing reports why.
+      - name: tests
+        run: node --test --test-timeout=30000 "tests/**/*.test.js"
+
+  ci-complete:
+    name: ci complete
+    runs-on: ubuntu-24.04
+    needs: [terraform-validate, tflint, canary-scripts, tests]
+    steps:
+      - run: echo "All gates passed."
