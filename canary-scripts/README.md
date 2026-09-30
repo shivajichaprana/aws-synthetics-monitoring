@@ -82,10 +82,24 @@ status codes alone records those minutes as healthy.
 | `REQUEST_BODY` | unset | Raw body, for a `POST` or `PUT` check. |
 | `LATENCY_BUDGET_MS` | `0` | Fails the run when exceeded. `0` disables it. |
 | `BODY_MUST_CONTAIN` | unset | Text that must appear in the response. |
-| `BODY_ERROR_PATTERNS` | four common signatures | Comma-separated text that must *not* appear. |
+| `BODY_ERROR_PATTERNS` | four common signatures | Comma-separated text that must *not* appear. The single word `none` turns the check off. |
 | `EXPECT_JSON_FIELDS` | `{}` | JSON object of dotted path to expected value, e.g. `{"status":"ok","data.count":0}`. |
 | `CERT_EXPIRY_WARNING_DAYS` | `14` | Fails when less lifetime remains. `0` disables it. |
 | `TAKE_SCREENSHOT` | `false` | This check opens no page, so a capture would be blank. |
+
+Two details of the body checks are worth knowing, because both are places where
+the obvious reading is wrong.
+
+**`BODY_ERROR_PATTERNS` is turned off with the word `none`, not by clearing it.**
+An empty value reads as absent throughout this bundle, and absent means *use the
+defaults* — so blanking the variable to silence a false positive hands back the
+four defaults and the check carries on firing, with nothing saying why.
+
+**`EXPECT_JSON_FIELDS` compares by value.** The members of an object match in
+whatever order they arrive, because that order means nothing in JSON and a
+service may change it between two responses that say the same thing. Array order
+*is* meaningful and must match. A field that is absent and a field holding `null`
+stay distinguishable.
 
 Authorization, cookie and API-key headers are listed as restricted, so they are
 redacted in the run report rather than written into the artifacts bucket.
@@ -134,6 +148,12 @@ as an outage. `MAX_LINKS` bounds the work, `CONCURRENCY` bounds the burst.
 navigation whose links all redirect is one rename away from being broken, so
 redirects get their own column in the summary.
 
+The run log names each reason an `href` did not get checked separately — not a
+fetchable address, out of scope, or a repeat of one already queued. They mean
+different things to whoever reads the run: a page of mail links and anchors is
+ordinary, and reporting those in one total labelled *out of scope* sends a reader
+off to audit a scoping configuration that is working exactly as written.
+
 | Variable | Default | Effect |
 |---|---|---|
 | `TARGET_URL` | required | Page whose links are checked. |
@@ -174,7 +194,7 @@ built in rather than left to be discovered:
 | Variable | Default | Effect |
 |---|---|---|
 | `TARGET_URL` | required | Where the journey starts. |
-| `JOURNEY_STEPS` | landing page only | JSON array of `{"name","path","waitFor"}`. |
+| `JOURNEY_STEPS` | landing page only | JSON array of `{"name","path","waitFor"}`. Each `path` must resolve onto `TARGET_URL`'s own origin. |
 | `GENERATE_BASELINE` | `false` | Accepts the current rendering as the new baseline. |
 | `VISUAL_VARIANCE_PCT` | `1` | Tolerated percentage of differing pixels. |
 | `IGNORE_SELECTORS` | unset | Comma-separated CSS selectors hidden before capture. |
@@ -184,6 +204,15 @@ built in rather than left to be discovered:
 
 Step names become screenshot file names and therefore baseline identities, so a
 duplicate name is rejected at startup rather than surfacing as a flapping alarm.
+
+A `path` is *resolved* against `TARGET_URL`, not appended to it, so it is checked
+at startup for having stayed on the same origin. A value beginning with two
+slashes is read as a host — `//pricing` resolves to `https://pricing/`, not to
+`/pricing` — and an absolute URL replaces the target outright. Either would have
+the canary capture a different site, store it as this application's baseline, and
+report on it under this application's name, while the run, the dashboard and the
+alarm all still say the application is being watched. One mistyped slash is the
+realistic way in, so it is refused rather than documented.
 
 ## Wiring a script to a canary
 

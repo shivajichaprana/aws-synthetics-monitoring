@@ -209,11 +209,61 @@ function readPath(document, path) {
 }
 
 /**
+ * Serialises a value with the members of every object in a fixed order.
+ *
+ * The order of an object's members carries no meaning in JSON, and a service
+ * is free to change it between two responses that say the same thing — a
+ * framework that starts adding a field, a serialiser upgrade, a map whose
+ * iteration order follows insertion. Array order, by contrast, IS meaningful,
+ * so arrays keep theirs.
+ *
+ * Comparing raw `JSON.stringify` output would therefore fail a healthy
+ * endpoint the first time it reordered the members of a nested object, and the
+ * failure would print two documents a reader cannot tell apart — the worst
+ * shape an alarm can take, because it looks like a bug in the canary.
+ *
+ * Returns `undefined` for a value JSON cannot represent, matching
+ * `JSON.stringify`, which is what lets a missing field stay distinguishable
+ * from a field holding `null`.
+ *
+ * @param {unknown} value
+ * @returns {string | undefined}
+ */
+function canonicalJson(value) {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+
+  // Honoured before the object is walked, for the same reason JSON.stringify
+  // honours it: a value with a toJSON serialises as whatever that returns, and
+  // enumerating its own keys instead would compare something else entirely.
+  const candidate = /** @type {{ toJSON?: () => unknown }} */ (value);
+  if (typeof candidate.toJSON === 'function') {
+    return canonicalJson(candidate.toJSON());
+  }
+
+  if (Array.isArray(value)) {
+    // A hole or an undefined entry serialises as null, as it does in
+    // JSON.stringify, because dropping it would shift every later index.
+    return `[${value.map((entry) => canonicalJson(entry) ?? 'null').join(',')}]`;
+  }
+
+  const members = [];
+  for (const key of Object.keys(value).sort()) {
+    const serialised = canonicalJson(/** @type {Record<string, unknown>} */ (value)[key]);
+    if (serialised !== undefined) {
+      members.push(`${JSON.stringify(key)}:${serialised}`);
+    }
+  }
+  return `{${members.join(',')}}`;
+}
+
+/**
  * Asserts a set of dotted-path values against a parsed JSON body.
  *
- * Comparison is by JSON serialisation, so `{"ready": true}` and the string
- * `"true"` are correctly treated as different, while nested objects and
- * arrays compare by value rather than by reference.
+ * Comparison is by value, not by reference: `{"ready": true}` and the string
+ * `"true"` are correctly treated as different, nested objects match whatever
+ * order their members arrive in, and arrays must match in order.
  *
  * @param {unknown} document
  * @param {Record<string, unknown>} expectations
@@ -223,10 +273,12 @@ function readPath(document, path) {
 function assertJsonFields(document, expectations, context = {}) {
   for (const [path, expected] of Object.entries(expectations)) {
     const actual = readPath(document, path);
-    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    const actualJson = canonicalJson(actual);
+    const expectedJson = canonicalJson(expected);
+    if (actualJson !== expectedJson) {
       const where = context.url ? ` from ${context.url}` : '';
       throw new AssertionFailure(
-        `Field "${path}"${where} was ${JSON.stringify(actual)} but ${JSON.stringify(expected)} was expected.`,
+        `Field "${path}"${where} was ${actualJson ?? 'absent'} but ${expectedJson ?? 'absent'} was expected.`,
         { path, actual, expected, ...context },
       );
     }
@@ -297,6 +349,7 @@ module.exports = {
   assertJsonFields,
   assertLatencyWithin,
   assertStatus,
+  canonicalJson,
   certificateDaysRemaining,
   findBodyError,
   parseStatusExpectation,

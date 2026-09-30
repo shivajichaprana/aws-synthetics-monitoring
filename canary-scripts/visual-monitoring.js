@@ -46,13 +46,53 @@ const assertions = require('./lib/assertions');
  *   SETTLE_MS              default 500, a pause before capture for entry animations
  *
  * A journey step is `{ "name": "pricing", "path": "/pricing", "waitFor": "h1" }`.
- * `path` is resolved against TARGET_URL; `waitFor` is an optional selector
- * that must appear before the screenshot is taken.
+ * `path` is resolved against TARGET_URL and must stay on its origin; `waitFor`
+ * is an optional selector that must appear before the screenshot is taken.
  */
 
 const USER_AGENT = 'synthetic-visual-check';
 
-/** @typedef {{ name: string, path: string, waitFor: string | null }} JourneyStep */
+/** @typedef {{ name: string, path: string, url: string, waitFor: string | null }} JourneyStep */
+
+/**
+ * Resolves a step's path against the target and refuses one that leaves it.
+ *
+ * `new URL(path, target)` is a resolver, not a joiner, so it accepts a great
+ * deal more than a path. A value beginning with two slashes is read as a host:
+ * `//pricing` against `https://app.example.com/` resolves to `https://pricing/`,
+ * and an absolute URL replaces the target outright. Either way the canary would
+ * screenshot a different site, store it as this application's baseline, and
+ * report on it under this application's name — while the run, the dashboard and
+ * the alarm all still say the application is being watched.
+ *
+ * One mistyped slash is the realistic way in, which is why this is a refusal at
+ * startup rather than a note in the documentation.
+ *
+ * @param {string} name the step's name, for the message
+ * @param {string} path
+ * @param {URL} base
+ * @returns {string}
+ */
+function resolveStepUrl(name, path, base) {
+  let resolved;
+  try {
+    resolved = new URL(path, base);
+  } catch {
+    throw new config.ConfigurationError(
+      `JOURNEY_STEPS entry "${name}" has a path that cannot be resolved against TARGET_URL: "${path}".`,
+    );
+  }
+
+  if (resolved.origin !== base.origin) {
+    throw new config.ConfigurationError(
+      `JOURNEY_STEPS entry "${name}" resolves to ${resolved.origin}, which is not TARGET_URL's origin ` +
+        `(${base.origin}). A path starting with two slashes is read as a host rather than as a directory, ` +
+        `so "//pricing" becomes https://pricing/ — write "/pricing" instead.`,
+    );
+  }
+
+  return resolved.toString();
+}
 
 /**
  * Validates the journey definition.
@@ -62,11 +102,14 @@ const USER_AGENT = 'synthetic-visual-check';
  * baseline. That is rejected here rather than discovered as a flapping alarm.
  *
  * @param {unknown} raw
+ * @param {string} baseUrl the already-validated TARGET_URL
  * @returns {JourneyStep[]}
  */
-function parseJourney(raw) {
+function parseJourney(raw, baseUrl) {
+  const base = new URL(baseUrl);
+
   if (raw === null || raw === undefined) {
-    return [{ name: 'landing', path: '', waitFor: null }];
+    return [{ name: 'landing', path: '', url: base.toString(), waitFor: null }];
   }
   if (!Array.isArray(raw) || raw.length === 0) {
     throw new config.ConfigurationError('JOURNEY_STEPS must be a non-empty JSON array of step objects.');
@@ -94,9 +137,12 @@ function parseJourney(raw) {
     }
     seen.add(name.toLowerCase());
 
+    const path = typeof step.path === 'string' ? step.path : '';
+
     return {
       name,
-      path: typeof step.path === 'string' ? step.path : '',
+      path,
+      url: resolveStepUrl(name, path, base),
       waitFor: typeof step.waitFor === 'string' && step.waitFor.trim() !== '' ? step.waitFor.trim() : null,
     };
   });
@@ -117,9 +163,13 @@ function parseJourney(raw) {
  * }}
  */
 function readConfiguration() {
+  // Read into a local first: the journey's paths are resolved against it, and
+  // the target has to be a validated absolute URL before that can happen.
+  const targetUrl = config.requiredUrl('TARGET_URL');
+
   return {
-    targetUrl: config.requiredUrl('TARGET_URL'),
-    journey: parseJourney(config.json('JOURNEY_STEPS', { fallback: null })),
+    targetUrl,
+    journey: parseJourney(config.json('JOURNEY_STEPS', { fallback: null }), targetUrl),
     generateBaseline: config.boolean('GENERATE_BASELINE', { fallback: false }),
     variancePct: config.integer('VISUAL_VARIANCE_PCT', { fallback: 1, min: 0, max: 100 }),
     ignoreSelectors: config.list('IGNORE_SELECTORS'),
@@ -190,7 +240,9 @@ const visualMonitoring = async function () {
   await page.setUserAgent(`${await page.browser().userAgent()} ${USER_AGENT}`);
 
   for (const step of settings.journey) {
-    const url = new URL(step.path, settings.targetUrl).toString();
+    // Already resolved and origin-checked at startup, so the loop navigates to
+    // a value that has been validated rather than re-deriving it per step.
+    const url = step.url;
 
     await synthetics.executeStep(step.name, async function () {
       const response = await page.goto(url, {

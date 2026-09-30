@@ -28,7 +28,8 @@ const assertions = require('./lib/assertions');
  *   REQUEST_BODY               raw request body, for a POST or PUT check
  *   LATENCY_BUDGET_MS          default 0 (off); fails the run when exceeded
  *   BODY_MUST_CONTAIN          text that must appear in the response body
- *   BODY_ERROR_PATTERNS        comma-separated signatures that must NOT appear
+ *   BODY_ERROR_PATTERNS        comma-separated signatures that must NOT appear;
+ *                              the single word "none" turns the check off
  *   EXPECT_JSON_FIELDS         JSON object of dotted path to expected value
  *   CERT_EXPIRY_WARNING_DAYS   default 14; 0 disables the check
  *   TAKE_SCREENSHOT            default false; this check makes no page visit
@@ -43,6 +44,33 @@ const DEFAULT_ERROR_PATTERNS = [
 ];
 
 const USER_AGENT = 'synthetic-api-check';
+
+/**
+ * The only value that turns the body-signature check off.
+ *
+ * Clearing the variable does not do it. An empty or whitespace-only value
+ * reads as absent everywhere in this bundle, and absent means "use the
+ * defaults" — so an operator silencing a false positive by blanking the
+ * variable gets the four defaults back and the check keeps firing, with
+ * nothing anywhere saying why. A word has to be written for "none", because
+ * the absence of a value cannot distinguish "unset" from "deliberately empty".
+ */
+const DISABLE_BODY_PATTERNS = 'none';
+
+/**
+ * @param {{ env?: NodeJS.ProcessEnv }} [options]
+ * @returns {string[]}
+ */
+function readBodyErrorPatterns(options = {}) {
+  const configured = config.list('BODY_ERROR_PATTERNS', {
+    env: options.env,
+    fallback: DEFAULT_ERROR_PATTERNS,
+  });
+  if (configured.length === 1 && configured[0].toLowerCase() === DISABLE_BODY_PATTERNS) {
+    return [];
+  }
+  return configured;
+}
 
 /**
  * Reads and validates every input before the first request is made.
@@ -79,7 +107,7 @@ function readConfiguration() {
     body: config.optionalString('REQUEST_BODY'),
     latencyBudgetMs: config.integer('LATENCY_BUDGET_MS', { fallback: 0, min: 0 }),
     bodyMustContain: config.optionalString('BODY_MUST_CONTAIN'),
-    bodyErrorPatterns: config.list('BODY_ERROR_PATTERNS', { fallback: DEFAULT_ERROR_PATTERNS }),
+    bodyErrorPatterns: readBodyErrorPatterns(),
     expectedJsonFields: /** @type {Record<string, unknown>} */ (expectedJsonFields),
     certExpiryWarningDays: config.integer('CERT_EXPIRY_WARNING_DAYS', { fallback: 14, min: 0 }),
     takeScreenshot: config.boolean('TAKE_SCREENSHOT', { fallback: false }),

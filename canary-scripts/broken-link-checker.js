@@ -94,8 +94,8 @@ const brokenLinkChecker = async function () {
 
   /** @type {string[]} */
   let selected = [];
-  /** @type {{ considered: number, skipped: number, truncated: boolean }} */
-  let selection = { considered: 0, skipped: 0, truncated: false };
+  /** @type {{ considered: number, unresolvable: number, outOfScope: number, duplicates: number, truncated: boolean }} */
+  let selection = { considered: 0, unresolvable: 0, outOfScope: 0, duplicates: 0, truncated: false };
 
   await synthetics.executeStep('collect', async function () {
     const response = await page.goto(settings.targetUrl, {
@@ -131,10 +131,22 @@ const brokenLinkChecker = async function () {
     });
 
     selected = result.links;
-    selection = { considered: result.considered, skipped: result.skipped, truncated: result.truncated };
+    selection = {
+      considered: result.considered,
+      unresolvable: result.unresolvable,
+      outOfScope: result.outOfScope,
+      duplicates: result.duplicates,
+      truncated: result.truncated,
+    };
 
+    // Each reason is named. A page whose links are mostly mail addresses and
+    // anchors is ordinary, and reporting those under one total called "out of
+    // scope" sends whoever reads the run to audit a scoping configuration that
+    // is working exactly as written.
     log.info(
-      `Found ${hrefs.length} anchors on ${baseUrl}: ${result.considered} resolvable, ${result.skipped} out of scope, ${selected.length} queued for checking.`,
+      `Found ${hrefs.length} anchors on ${baseUrl}: ${result.considered} resolvable, ` +
+        `${result.unresolvable} not fetchable addresses, ${result.outOfScope} out of scope, ` +
+        `${result.duplicates} repeated, ${selected.length} queued for checking.`,
     );
     if (result.truncated) {
       log.warn(`More links were in scope than MAX_LINKS (${settings.maxLinks}); the remainder was not checked this run.`);

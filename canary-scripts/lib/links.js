@@ -10,7 +10,15 @@
  * limited it.
  */
 
-/** Schemes that are not requests and are never followed. */
+/**
+ * Schemes that are not requests and are never followed.
+ *
+ * A fast path rather than the guarantee. What actually confines the checker to
+ * fetchable addresses is the protocol test further down, which refuses anything
+ * that does not resolve to http or https — including a scheme nobody thought to
+ * name here. This list exists so the common cases are rejected before a URL is
+ * constructed, and so the intent is written down.
+ */
 const NON_HTTP_SCHEMES = ['mailto:', 'tel:', 'javascript:', 'data:', 'blob:', 'sms:', 'file:', 'about:'];
 
 /**
@@ -115,7 +123,24 @@ function isInScope(url, options) {
  *   excludePatterns?: string[],
  *   limit?: number,
  * }} options
- * @returns {{ links: string[], considered: number, skipped: number, truncated: boolean }}
+ * The three reasons an href does not reach the queue are counted separately,
+ * because they mean different things to whoever reads the run: `unresolvable`
+ * is a `mailto:` or an anchor, which is normal and not a finding; `outOfScope`
+ * is a link the configuration deliberately excluded; `duplicates` is the same
+ * request already queued. One combined figure reported as "out of scope" —
+ * which is what a single counter invites — describes a page of ordinary mail
+ * links as a scoping problem. `skipped` is kept as the total that never
+ * reached the queue for a reason other than being a repeat.
+ *
+ * @returns {{
+ *   links: string[],
+ *   considered: number,
+ *   unresolvable: number,
+ *   outOfScope: number,
+ *   duplicates: number,
+ *   skipped: number,
+ *   truncated: boolean,
+ * }}
  */
 function selectLinks(hrefs, options) {
   const limit = options.limit ?? 0;
@@ -123,20 +148,23 @@ function selectLinks(hrefs, options) {
   /** @type {string[]} */
   const links = [];
   let considered = 0;
-  let skipped = 0;
+  let unresolvable = 0;
+  let outOfScope = 0;
+  let duplicates = 0;
 
   for (const href of hrefs) {
     const normalized = normalizeLink(href, options.baseUrl);
     if (normalized === null) {
-      skipped += 1;
+      unresolvable += 1;
       continue;
     }
     considered += 1;
     if (!isInScope(normalized, options)) {
-      skipped += 1;
+      outOfScope += 1;
       continue;
     }
     if (seen.has(normalized)) {
+      duplicates += 1;
       continue;
     }
     seen.add(normalized);
@@ -147,7 +175,10 @@ function selectLinks(hrefs, options) {
   return {
     links: truncated ? links.slice(0, limit) : links,
     considered,
-    skipped,
+    unresolvable,
+    outOfScope,
+    duplicates,
+    skipped: unresolvable + outOfScope,
     truncated,
   };
 }
