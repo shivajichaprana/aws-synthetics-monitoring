@@ -24,6 +24,42 @@ Everything ships as a template with placeholder values. Nothing in this
 repository is wired to a live account, and no state, plan file, or tfvars file
 with real values is tracked.
 
+## How it fits together
+
+```mermaid
+flowchart LR
+    SCHED["Synthetics<br/>schedule"] --> FN["Canary script"]
+    FN -->|"HTTP / browser"| EP["Your endpoint"]
+    FN -->|"artifacts"| S3["S3, SSE-KMS<br/>lifecycle-expired"]
+    FN -->|"SuccessPercent<br/>Duration"| CWM["CloudWatch<br/>metrics"]
+    BROWSER["Real browser"] -->|"guest credential"| MON["RUM app monitor"]
+    MON --> CWM
+    CWM --> ALARMS["Burn-rate pairs<br/>+ composites"]
+    CWM --> DASH["Objectives<br/>dashboard"]
+    ALARMS --> TOPIC["SNS, customer<br/>-managed key"]
+    TOPIC --> ONCALL["On call"]
+```
+
+Three layers, each opt-in and each created by naming the thing it observes:
+**probes** (canaries calling real endpoints on a schedule), **telemetry** (what
+real browsers experienced), and **objectives** (dashboards and alarms derived
+from the probe metrics). The two signal sources meet only on the dashboard —
+nothing in the alerting path reads real user telemetry, because it is sampled
+and publicly writable by construction.
+
+[`docs/architecture.md`](docs/architecture.md) walks through each layer, and
+through the shapes that are the way they are because the alternative does not
+work.
+
+## Documentation
+
+| Document | Read it for |
+|---|---|
+| [`docs/architecture.md`](docs/architecture.md) | How the three layers compose, the orderings and cycles that shape the root, and what the design cannot see. |
+| [`docs/slo-runbook.md`](docs/slo-runbook.md) | The objective arithmetic, triage for each alarm, and why an alarm can fire and reach nobody. |
+| [`canary-scripts/README.md`](canary-scripts/README.md) | What *healthy* means, the bundle layout the service requires, and how to add a check. |
+| [`tests/README.md`](tests/README.md) | What the offline suite holds in place, and how the Synthetics runtime is stood in for. |
+
 ## Layout
 
 ```
@@ -37,6 +73,8 @@ with real values is tracked.
 ├── outputs.tf               What was created, and what was deliberately not
 ├── terraform.tfvars.example Template for a real tfvars file
 ├── .tflint.hcl              Lint configuration used by the pipeline
+├── Makefile                 Every gate the pipeline runs, runnable locally
+├── docs/                    Architecture and the objectives runbook
 └── canary-scripts/          The code the canaries run, and its build
     ├── api-canary.js        HTTP contract check for a single endpoint
     ├── heartbeat-canary.js  Minimal availability check at the fastest cadence
@@ -138,6 +176,36 @@ never again, and preconditions are only evaluated when Terraform plans an action
 for the resource — a guard with an empty input quietly stops checking after the
 first apply.
 
+## Objectives
+
+Canary metrics are turned into an availability objective with an error budget
+and a two-tier severity ladder. The defaults:
+
+| | Default | |
+|---|---|---|
+| Objective | 99.5% | `slo_objective` |
+| Budget period | 30 days | `slo_window_days`, giving a 216-minute budget |
+| `fast` tier | 14.4x burn over 60 min, confirmed over 5 min | Breaches below 92.8% success, which is 2% in an hour. Page. |
+| `slow` tier | 6x burn over 6 h, confirmed over 30 min | Breaches below 97% success, which is 5% in six hours. Ticket. |
+
+Each tier is two metric alarms and one composite that is in ALARM only while
+both windows are breaching — the long one decides whether the objective is in
+trouble, the short one decides when to stop saying so. Only the composites
+notify.
+
+The objective is 99.5% rather than the more fashionable 99.9% because of
+sampling, not ambition. **A canary contributes one sample per run**, so the
+finest error rate a window can express is one failure divided by the runs it
+holds: a 60-minute window over a five-minute canary holds twelve runs and
+cannot show anything below 8.33%, while a 99.9% objective puts the `fast` tier's
+threshold at 1.44%. Every tier would then fire on the same single failed run and
+the severities would be decoration.
+
+`slo_windows_undersampled` names every canary-and-tier pair where that applies,
+a plan-time guard refuses a configuration where it applies to *every* tier of a
+canary, and [the runbook](docs/slo-runbook.md#the-sampling-floor) has the
+arithmetic. Raising the objective means shortening the canary schedule first.
+
 ## Getting started
 
 ```bash
@@ -151,6 +219,29 @@ terraform apply terraform.tfplan
 `validate` and `fmt -check` need no credentials and are the useful pre-review
 gate. `plan` does need credentials, because the account context data sources are
 read before anything else can be resolved.
+
+## Validation
+
+Every gate the pipeline runs is runnable locally with the same flags, and none
+of them needs an AWS account:
+
+| Gate | Command | Catches |
+|---|---|---|
+| Formatting | `terraform fmt -check -diff -recursive` | Drift from canonical HCL. |
+| Configuration | `terraform init -backend=false && terraform validate` | Unresolvable references, bad types, malformed expressions. |
+| Lint | `tflint --recursive --minimum-failure-severity=error` | Provider-specific errors a validate accepts. |
+| Script syntax | `node --check` over every canary script and helper | A parse error, which the service would otherwise surface as a failed run — the bundle is compiled on first invocation and not before. |
+| Conventions | `node tests/lint/canary-conventions.js` | Third-party code in the bundle, a helper reaching for the Synthetics runtime, a hardcoded target. |
+| Shell | `bash -n` and `shellcheck` over `canary-scripts/build.sh` | A bundler that fails after packaging half a tree. |
+| Bundle | `./canary-scripts/build.sh` | A layout the service cannot load, and an archive past the inline upload limit. |
+| Tests | `node --test --test-timeout=30000 "tests/**/*.test.js"` | A canary that passes while the endpoint is broken. |
+
+Pass the test runner the quoted glob rather than the directory: `node --test
+tests` tries to load `tests` as a module and reports one cryptic failure.
+
+The suite's timeout is not decoration — several tests hold a socket open
+deliberately to prove a per-request timeout fires, so a regression there makes
+the suite hang rather than fail.
 
 ## Conventions this repository holds itself to
 
