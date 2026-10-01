@@ -73,7 +73,7 @@ work.
 ├── outputs.tf               What was created, and what was deliberately not
 ├── terraform.tfvars.example Template for a real tfvars file
 ├── .tflint.hcl              Lint configuration used by the pipeline
-├── Makefile                 Every gate the pipeline runs, runnable locally
+├── Makefile                 Every gate the pipeline runs, plus `make help`
 ├── docs/                    Architecture and the objectives runbook
 └── canary-scripts/          The code the canaries run, and its build
     ├── api-canary.js        HTTP contract check for a single endpoint
@@ -209,7 +209,21 @@ arithmetic. Raising the objective means shortening the canary schedule first.
 ## Getting started
 
 ```bash
+make tools                                     # what is installed, what is missing
 cp terraform.tfvars.example terraform.tfvars   # then edit it
+make ci                                        # every offline gate, no credentials
+make plan                                      # read the diff
+make deploy                                    # apply the plan you just read
+make audit                                     # what the monitoring still cannot see
+```
+
+`make deploy` applies the plan saved by `make plan` and never a fresh one.
+Applying a fresh plan means approving something nobody read, and the gap between
+the plan that was reviewed and the one that is applied is where a surprise
+lives. `make help` lists every target; the raw `terraform` equivalents are below
+if you would rather not use make.
+
+```bash
 terraform init
 terraform validate
 terraform plan -out=terraform.tfplan
@@ -225,16 +239,21 @@ read before anything else can be resolved.
 Every gate the pipeline runs is runnable locally with the same flags, and none
 of them needs an AWS account:
 
-| Gate | Command | Catches |
+| Gate | Target | Catches |
 |---|---|---|
-| Formatting | `terraform fmt -check -diff -recursive` | Drift from canonical HCL. |
-| Configuration | `terraform init -backend=false && terraform validate` | Unresolvable references, bad types, malformed expressions. |
-| Lint | `tflint --recursive --minimum-failure-severity=error` | Provider-specific errors a validate accepts. |
-| Script syntax | `node --check` over every canary script and helper | A parse error, which the service would otherwise surface as a failed run — the bundle is compiled on first invocation and not before. |
-| Conventions | `node tests/lint/canary-conventions.js` | Third-party code in the bundle, a helper reaching for the Synthetics runtime, a hardcoded target. |
-| Shell | `bash -n` and `shellcheck` over `canary-scripts/build.sh` | A bundler that fails after packaging half a tree. |
-| Bundle | `./canary-scripts/build.sh` | A layout the service cannot load, and an archive past the inline upload limit. |
-| Tests | `node --test --test-timeout=30000 "tests/**/*.test.js"` | A canary that passes while the endpoint is broken. |
+| Formatting | `make fmt-check` | Drift from canonical HCL. |
+| Configuration | `make validate` | Unresolvable references, bad types, malformed expressions. |
+| Lint | `make tflint` | Provider-specific errors a validate accepts. |
+| Script syntax | `make bundle` — the bundler runs `node --check` over every file on the way in | A parse error, which the service would otherwise surface as a failed run: the bundle is compiled on first invocation and not before. |
+| Conventions | `make conventions` | Third-party code in the bundle, a helper reaching for the Synthetics runtime, a hardcoded target. |
+| Shell | `make shell-lint` | A bundler that fails after packaging half a tree. |
+| Bundle | `make bundle` | A layout the service cannot load, and an archive past the inline upload limit. |
+| Tests | `make test` | A canary that passes while the endpoint is broken. |
+
+`make ci` runs all of them. Each target uses exactly the flags the pipeline
+uses, and the Terraform directory list is discovered from the tree rather than
+written down — a list maintained by hand drifts from the pipeline's the first
+time a directory is added, and the symptom is a configuration nobody validates.
 
 Pass the test runner the quoted glob rather than the directory: `node --test
 tests` tries to load `tests` as a module and reports one cryptic failure.
